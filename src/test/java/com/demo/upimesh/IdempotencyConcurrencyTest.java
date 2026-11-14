@@ -7,7 +7,8 @@ import com.demo.upimesh.model.PaymentInstruction;
 import com.demo.upimesh.model.AccountRepository;
 import com.demo.upimesh.service.BridgeIngestionService;
 import com.demo.upimesh.service.DemoService;
-import com.demo.upimesh.service.IdempotencyService;
+import com.demo.upimesh.model.IdempotencyRecordRepository;
+import com.demo.upimesh.model.TransactionRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,7 +16,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 
 import java.math.BigDecimal;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -28,14 +28,16 @@ class IdempotencyConcurrencyTest {
 
     @Autowired private DemoService demoService;
     @Autowired private BridgeIngestionService bridge;
-    @Autowired private IdempotencyService idempotency;
+    @Autowired private IdempotencyRecordRepository idempotencyRecords;
+    @Autowired private TransactionRepository transactions;
     @Autowired private AccountRepository accounts;
     @Autowired private HybridCryptoService crypto;
     @Autowired private ServerKeyHolder serverKey;
 
     @BeforeEach
     void clear() {
-        idempotency.clear();
+        idempotencyRecords.deleteAll();
+        transactions.deleteAll();
     }
 
     @Test
@@ -50,8 +52,7 @@ class IdempotencyConcurrencyTest {
 
         ExecutorService pool = Executors.newFixedThreadPool(3);
         CountDownLatch start = new CountDownLatch(1);
-        AtomicInteger settled = new AtomicInteger();
-        AtomicInteger duplicates = new AtomicInteger();
+        java.util.List<BridgeIngestionService.IngestResult> results = new CopyOnWriteArrayList<>();
 
         Future<?>[] futures = new Future[3];
         for (int i = 0; i < 3; i++) {
@@ -60,8 +61,7 @@ class IdempotencyConcurrencyTest {
                 try {
                     start.await();
                     BridgeIngestionService.IngestResult r = bridge.ingest(packet, node, 3);
-                    if ("SETTLED".equals(r.outcome())) settled.incrementAndGet();
-                    else if ("DUPLICATE_DROPPED".equals(r.outcome())) duplicates.incrementAndGet();
+                    results.add(r);
                 } catch (Exception e) { throw new RuntimeException(e); }
             });
         }
@@ -70,14 +70,23 @@ class IdempotencyConcurrencyTest {
         for (Future<?> f : futures) f.get(5, TimeUnit.SECONDS);
         pool.shutdown();
 
-        assertEquals(1, settled.get(), "exactly one bridge should settle");
-        assertEquals(2, duplicates.get(), "the other two should be duplicates");
+        assertEquals(3, results.size());
+        assertTrue(results.stream().allMatch(r -> "SETTLED".equals(r.outcome())), "duplicates replay the original response");
+        assertEquals(1, results.stream().map(BridgeIngestionService.IngestResult::transactionId).distinct().count());
 
         // Balance moved exactly once
         BigDecimal aliceAfter = accounts.findById("alice@demo").orElseThrow().getBalance();
         BigDecimal bobAfter = accounts.findById("bob@demo").orElseThrow().getBalance();
         assertEquals(aliceBefore.subtract(new BigDecimal("100.00")), aliceAfter);
         assertEquals(bobBefore.add(new BigDecimal("100.00")), bobAfter);
+    }
+
+    @Test
+    void duplicateDeliveryReplaysOriginalResult() throws Exception {
+        MeshPacket packet = demoService.createPacket("alice@demo", "bob@demo", new BigDecimal("12.00"), "1234", 5);
+        var first = bridge.ingest(packet, "bridge-a", 1);
+        var retry = bridge.ingest(packet, "bridge-b", 2);
+        assertEquals(first, retry);
     }
 
     @Test
