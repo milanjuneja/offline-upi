@@ -11,13 +11,16 @@ import java.time.Instant;
 @Service
 public class PacketProcessingService {
     private final IdempotencyRecordRepository records;
+    private final PaymentNonceRepository paymentNonces;
     private final HybridCryptoService crypto;
     private final SettlementService settlement;
     private final ObjectMapper mapper;
 
-    public PacketProcessingService(IdempotencyRecordRepository records, HybridCryptoService crypto,
+    public PacketProcessingService(IdempotencyRecordRepository records, PaymentNonceRepository paymentNonces,
+                                   HybridCryptoService crypto,
                                    SettlementService settlement, ObjectMapper mapper) {
-        this.records = records; this.crypto = crypto; this.settlement = settlement; this.mapper = mapper;
+        this.records = records; this.paymentNonces = paymentNonces; this.crypto = crypto;
+        this.settlement = settlement; this.mapper = mapper;
     }
 
     @Transactional
@@ -43,7 +46,13 @@ public class PacketProcessingService {
         long ageSeconds = (Instant.now().toEpochMilli() - instruction.getSignedAt()) / 1000;
         if (ageSeconds > maxAgeSeconds) result = BridgeIngestionService.IngestResult.invalid(hash, "stale_packet");
         else if (ageSeconds < -300) result = BridgeIngestionService.IngestResult.invalid(hash, "future_dated");
-        else {
+        else if (instruction.getNonce() == null || instruction.getNonce().isBlank()) {
+            result = BridgeIngestionService.IngestResult.invalid(hash, "missing_nonce");
+        } else {
+            PaymentNonce paymentNonce = new PaymentNonce();
+            paymentNonce.setNonce(instruction.getNonce());
+            paymentNonces.saveAndFlush(paymentNonce);
+
             Transaction tx = settlement.settle(instruction, hash, bridgeNodeId, hopCount);
             result = tx.getStatus() == Transaction.Status.SETTLED
                     ? BridgeIngestionService.IngestResult.settled(hash, tx)

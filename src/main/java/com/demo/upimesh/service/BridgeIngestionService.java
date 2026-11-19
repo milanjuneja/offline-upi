@@ -30,8 +30,11 @@ public class BridgeIngestionService {
             try {
                 return processor.process(packet, hash, bridgeNodeId, hopCount, maxAgeSeconds);
             } catch (DataIntegrityViolationException duplicate) {
-                IdempotencyRecord record = records.findByPacketHash(hash).orElseThrow(() -> duplicate);
-                return mapper.readValue(record.getResponsePayload(), IngestResult.class);
+                var record = records.findByPacketHash(hash);
+                if (record.isPresent()) {
+                    return mapper.readValue(record.get().getResponsePayload(), IngestResult.class);
+                }
+                return IngestResult.invalid(hash, "reused_nonce");
             }
         } catch (Exception e) {
             return IngestResult.invalid(hash, "internal_error");

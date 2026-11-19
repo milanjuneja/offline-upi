@@ -9,6 +9,7 @@ import com.demo.upimesh.service.BridgeIngestionService;
 import com.demo.upimesh.service.DemoService;
 import com.demo.upimesh.model.IdempotencyRecordRepository;
 import com.demo.upimesh.model.TransactionRepository;
+import com.demo.upimesh.model.PaymentNonceRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -30,6 +31,7 @@ class IdempotencyConcurrencyTest {
     @Autowired private BridgeIngestionService bridge;
     @Autowired private IdempotencyRecordRepository idempotencyRecords;
     @Autowired private TransactionRepository transactions;
+    @Autowired private PaymentNonceRepository paymentNonces;
     @Autowired private AccountRepository accounts;
     @Autowired private HybridCryptoService crypto;
     @Autowired private ServerKeyHolder serverKey;
@@ -38,6 +40,7 @@ class IdempotencyConcurrencyTest {
     void clear() {
         idempotencyRecords.deleteAll();
         transactions.deleteAll();
+        paymentNonces.deleteAll();
     }
 
     @Test
@@ -90,6 +93,23 @@ class IdempotencyConcurrencyTest {
     }
 
     @Test
+    void reusedNonceIsRejectedEvenWhenCiphertextChanges() throws Exception {
+        String nonce = "reused-nonce";
+        PaymentInstruction instruction = new PaymentInstruction(
+                "alice@demo", "bob@demo", new BigDecimal("10.00"), "pin", nonce, System.currentTimeMillis());
+        MeshPacket first = packetFor(instruction);
+        MeshPacket second = packetFor(instruction);
+
+        var accepted = bridge.ingest(first, "bridge-a", 1);
+        var replay = bridge.ingest(second, "bridge-b", 1);
+
+        assertEquals("SETTLED", accepted.outcome());
+        assertEquals("INVALID", replay.outcome());
+        assertEquals("reused_nonce", replay.reason());
+        assertEquals(1, transactions.count());
+    }
+
+    @Test
     void tamperedCiphertextIsRejected() throws Exception {
         MeshPacket packet = demoService.createPacket(
                 "alice@demo", "bob@demo", new BigDecimal("50.00"), "1234", 5);
@@ -116,5 +136,14 @@ class IdempotencyConcurrencyTest {
         assertEquals(original.getReceiverVpa(), decrypted.getReceiverVpa());
         assertEquals(0, original.getAmount().compareTo(decrypted.getAmount()));
         assertEquals(original.getNonce(), decrypted.getNonce());
+    }
+
+    private MeshPacket packetFor(PaymentInstruction instruction) throws Exception {
+        MeshPacket packet = new MeshPacket();
+        packet.setPacketId(java.util.UUID.randomUUID().toString());
+        packet.setTtl(5);
+        packet.setCreatedAt(System.currentTimeMillis());
+        packet.setCiphertext(crypto.encrypt(instruction, serverKey.getPublicKey()));
+        return packet;
     }
 }
