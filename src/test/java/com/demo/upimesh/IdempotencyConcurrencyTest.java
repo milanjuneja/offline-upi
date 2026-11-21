@@ -12,10 +12,12 @@ import com.demo.upimesh.model.TransactionRepository;
 import com.demo.upimesh.model.PaymentNonceRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
 import java.math.BigDecimal;
+import java.nio.file.Path;
 import java.util.concurrent.*;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -26,6 +28,8 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @SpringBootTest
 class IdempotencyConcurrencyTest {
+
+    @TempDir Path temporaryKeyDirectory;
 
     @Autowired private DemoService demoService;
     @Autowired private BridgeIngestionService bridge;
@@ -110,6 +114,32 @@ class IdempotencyConcurrencyTest {
     }
 
     @Test
+    void selfTransferIsRejectedBeforeSettlement() throws Exception {
+        PaymentInstruction instruction = new PaymentInstruction(
+                "alice@demo", "alice@demo", new BigDecimal("10.00"), "pin", "self-transfer", System.currentTimeMillis());
+
+        var result = bridge.ingest(packetFor(instruction), "bridge-a", 1);
+
+        assertEquals("INVALID", result.outcome());
+        assertEquals("self_transfer", result.reason());
+        assertEquals(0, transactions.count());
+        assertFalse(paymentNonces.existsByNonce("self-transfer"));
+    }
+
+    @Test
+    void amountWithMoreThanTwoDecimalPlacesIsRejectedBeforeSettlement() throws Exception {
+        PaymentInstruction instruction = new PaymentInstruction(
+                "alice@demo", "bob@demo", new BigDecimal("10.001"), "pin", "invalid-amount", System.currentTimeMillis());
+
+        var result = bridge.ingest(packetFor(instruction), "bridge-a", 1);
+
+        assertEquals("INVALID", result.outcome());
+        assertEquals("invalid_amount", result.reason());
+        assertEquals(0, transactions.count());
+        assertFalse(paymentNonces.existsByNonce("invalid-amount"));
+    }
+
+    @Test
     void tamperedCiphertextIsRejected() throws Exception {
         MeshPacket packet = demoService.createPacket(
                 "alice@demo", "bob@demo", new BigDecimal("50.00"), "1234", 5);
@@ -136,6 +166,18 @@ class IdempotencyConcurrencyTest {
         assertEquals(original.getReceiverVpa(), decrypted.getReceiverVpa());
         assertEquals(0, original.getAmount().compareTo(decrypted.getAmount()));
         assertEquals(original.getNonce(), decrypted.getNonce());
+    }
+
+    @Test
+    void serverKeyPairPersistsAcrossRestart() throws Exception {
+        ServerKeyHolder first = new ServerKeyHolder(temporaryKeyDirectory);
+        first.init();
+        String firstPublicKey = first.getPublicKeyBase64();
+
+        ServerKeyHolder restarted = new ServerKeyHolder(temporaryKeyDirectory);
+        restarted.init();
+
+        assertEquals(firstPublicKey, restarted.getPublicKeyBase64());
     }
 
     private MeshPacket packetFor(PaymentInstruction instruction) throws Exception {

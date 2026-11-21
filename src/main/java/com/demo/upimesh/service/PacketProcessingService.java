@@ -12,14 +12,15 @@ import java.time.Instant;
 public class PacketProcessingService {
     private final IdempotencyRecordRepository records;
     private final PaymentNonceRepository paymentNonces;
+    private final AccountRepository accounts;
     private final HybridCryptoService crypto;
     private final SettlementService settlement;
     private final ObjectMapper mapper;
 
     public PacketProcessingService(IdempotencyRecordRepository records, PaymentNonceRepository paymentNonces,
-                                   HybridCryptoService crypto,
+                                   AccountRepository accounts, HybridCryptoService crypto,
                                    SettlementService settlement, ObjectMapper mapper) {
-        this.records = records; this.paymentNonces = paymentNonces; this.crypto = crypto;
+        this.records = records; this.paymentNonces = paymentNonces; this.accounts = accounts; this.crypto = crypto;
         this.settlement = settlement; this.mapper = mapper;
     }
 
@@ -43,25 +44,43 @@ public class PacketProcessingService {
             return result;
         }
 
-        long ageSeconds = (Instant.now().toEpochMilli() - instruction.getSignedAt()) / 1000;
-        if (ageSeconds > maxAgeSeconds) result = BridgeIngestionService.IngestResult.invalid(hash, "stale_packet");
-        else if (ageSeconds < -300) result = BridgeIngestionService.IngestResult.invalid(hash, "future_dated");
-        else if (instruction.getNonce() == null || instruction.getNonce().isBlank()) {
-            result = BridgeIngestionService.IngestResult.invalid(hash, "missing_nonce");
+        String validationFailure = validate(instruction);
+        if (validationFailure != null) {
+            result = BridgeIngestionService.IngestResult.invalid(hash, validationFailure);
         } else {
-            PaymentNonce paymentNonce = new PaymentNonce();
-            paymentNonce.setNonce(instruction.getNonce());
-            paymentNonces.saveAndFlush(paymentNonce);
+            long ageSeconds = (Instant.now().toEpochMilli() - instruction.getSignedAt()) / 1000;
+            if (ageSeconds > maxAgeSeconds) result = BridgeIngestionService.IngestResult.invalid(hash, "stale_packet");
+            else if (ageSeconds < -300) result = BridgeIngestionService.IngestResult.invalid(hash, "future_dated");
+            else if (instruction.getNonce() == null || instruction.getNonce().isBlank()) {
+                result = BridgeIngestionService.IngestResult.invalid(hash, "missing_nonce");
+            } else {
+                PaymentNonce paymentNonce = new PaymentNonce();
+                paymentNonce.setNonce(instruction.getNonce());
+                paymentNonces.saveAndFlush(paymentNonce);
 
-            Transaction tx = settlement.settle(instruction, hash, bridgeNodeId, hopCount);
-            result = tx.getStatus() == Transaction.Status.SETTLED
-                    ? BridgeIngestionService.IngestResult.settled(hash, tx)
-                    : BridgeIngestionService.IngestResult.rejected(hash, tx);
-            record.setTransactionId(tx.getId());
-            record.setStatus(tx.getStatus() == Transaction.Status.SETTLED
-                    ? IdempotencyRecord.Status.COMPLETED : IdempotencyRecord.Status.REJECTED);
+                Transaction tx = settlement.settle(instruction, hash, bridgeNodeId, hopCount);
+                result = tx.getStatus() == Transaction.Status.SETTLED
+                        ? BridgeIngestionService.IngestResult.settled(hash, tx)
+                        : BridgeIngestionService.IngestResult.rejected(hash, tx);
+                record.setTransactionId(tx.getId());
+                record.setStatus(tx.getStatus() == Transaction.Status.SETTLED
+                        ? IdempotencyRecord.Status.COMPLETED : IdempotencyRecord.Status.REJECTED);
+            }
         }
         record.setResponsePayload(mapper.writeValueAsString(result));
         return result;
+    }
+
+    private String validate(PaymentInstruction instruction) {
+        if (instruction.getSenderVpa() == null || instruction.getSenderVpa().isBlank()) return "missing_sender";
+        if (instruction.getReceiverVpa() == null || instruction.getReceiverVpa().isBlank()) return "missing_receiver";
+        if (instruction.getSenderVpa().equals(instruction.getReceiverVpa())) return "self_transfer";
+        if (instruction.getAmount() == null || instruction.getAmount().signum() <= 0
+                || instruction.getAmount().scale() > 2
+                || instruction.getAmount().precision() - instruction.getAmount().scale() > 17) return "invalid_amount";
+        if (instruction.getSignedAt() == null) return "missing_timestamp";
+        if (!accounts.existsById(instruction.getSenderVpa())) return "unknown_sender";
+        if (!accounts.existsById(instruction.getReceiverVpa())) return "unknown_receiver";
+        return null;
     }
 }
