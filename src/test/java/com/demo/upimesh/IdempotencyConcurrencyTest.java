@@ -19,6 +19,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -137,6 +138,97 @@ class IdempotencyConcurrencyTest {
         assertEquals("invalid_amount", result.reason());
         assertEquals(0, transactions.count());
         assertFalse(paymentNonces.existsByNonce("invalid-amount"));
+    }
+
+    @Test
+    void expiredPacketIsRejectedBeforeSettlement() throws Exception {
+        PaymentInstruction instruction = new PaymentInstruction(
+                "alice@demo", "bob@demo", new BigDecimal("10.00"), "pin", "expired-packet",
+                System.currentTimeMillis() - TimeUnit.DAYS.toMillis(2));
+
+        var result = bridge.ingest(packetFor(instruction), "bridge-a", 1);
+
+        assertEquals("INVALID", result.outcome());
+        assertEquals("stale_packet", result.reason());
+        assertEquals(0, transactions.count());
+        assertFalse(paymentNonces.existsByNonce("expired-packet"));
+    }
+
+    @Test
+    void futureDatedPacketIsRejectedBeforeSettlement() throws Exception {
+        PaymentInstruction instruction = new PaymentInstruction(
+                "alice@demo", "bob@demo", new BigDecimal("10.00"), "pin", "future-packet",
+                System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(6));
+
+        var result = bridge.ingest(packetFor(instruction), "bridge-a", 1);
+
+        assertEquals("INVALID", result.outcome());
+        assertEquals("future_dated", result.reason());
+        assertEquals(0, transactions.count());
+        assertFalse(paymentNonces.existsByNonce("future-packet"));
+    }
+
+    @Test
+    void insufficientBalanceCreatesRejectedTransactionWithoutMovingMoney() throws Exception {
+        BigDecimal aliceBefore = accounts.findById("alice@demo").orElseThrow().getBalance();
+        BigDecimal bobBefore = accounts.findById("bob@demo").orElseThrow().getBalance();
+        MeshPacket packet = demoService.createPacket("alice@demo", "bob@demo",
+                aliceBefore.add(BigDecimal.ONE), "1234", 5);
+
+        var result = bridge.ingest(packet, "bridge-a", 1);
+
+        assertEquals("REJECTED", result.outcome());
+        assertEquals("insufficient_balance", result.reason());
+        assertEquals(aliceBefore, accounts.findById("alice@demo").orElseThrow().getBalance());
+        assertEquals(bobBefore, accounts.findById("bob@demo").orElseThrow().getBalance());
+        assertEquals(1, transactions.count());
+    }
+
+    @Test
+    void unknownSenderIsRejectedBeforeSettlement() throws Exception {
+        PaymentInstruction instruction = new PaymentInstruction(
+                "missing@demo", "bob@demo", new BigDecimal("10.00"), "pin", "unknown-sender",
+                System.currentTimeMillis());
+
+        var result = bridge.ingest(packetFor(instruction), "bridge-a", 1);
+
+        assertEquals("INVALID", result.outcome());
+        assertEquals("unknown_sender", result.reason());
+        assertEquals(0, transactions.count());
+        assertFalse(paymentNonces.existsByNonce("unknown-sender"));
+    }
+
+    @Test
+    void concurrentDifferentPaymentsCanRetryAfterOptimisticLockConflict() throws Exception {
+        BigDecimal aliceBefore = accounts.findById("alice@demo").orElseThrow().getBalance();
+        BigDecimal bobBefore = accounts.findById("bob@demo").orElseThrow().getBalance();
+        MeshPacket firstPacket = demoService.createPacket("alice@demo", "bob@demo", new BigDecimal("100.00"), "1234", 5);
+        MeshPacket secondPacket = demoService.createPacket("alice@demo", "bob@demo", new BigDecimal("100.00"), "1234", 5);
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicReference<BridgeIngestionService.IngestResult> firstResult = new AtomicReference<>();
+        AtomicReference<BridgeIngestionService.IngestResult> secondResult = new AtomicReference<>();
+        Future<?> first = pool.submit(() -> { start.await(); firstResult.set(bridge.ingest(firstPacket, "bridge-a", 1)); return null; });
+        Future<?> second = pool.submit(() -> { start.await(); secondResult.set(bridge.ingest(secondPacket, "bridge-b", 1)); return null; });
+
+        start.countDown();
+        first.get(5, TimeUnit.SECONDS);
+        second.get(5, TimeUnit.SECONDS);
+        pool.shutdown();
+
+        assertEquals(1, java.util.stream.Stream.of(firstResult.get(), secondResult.get())
+                .filter(result -> "SETTLED".equals(result.outcome())).count());
+        assertEquals(1, java.util.stream.Stream.of(firstResult.get(), secondResult.get())
+                .filter(result -> "RETRYABLE_ERROR".equals(result.outcome())).count());
+        assertEquals(aliceBefore.subtract(new BigDecimal("100.00")), accounts.findById("alice@demo").orElseThrow().getBalance());
+        assertEquals(bobBefore.add(new BigDecimal("100.00")), accounts.findById("bob@demo").orElseThrow().getBalance());
+
+        MeshPacket retryPacket = "RETRYABLE_ERROR".equals(firstResult.get().outcome()) ? firstPacket : secondPacket;
+        var retry = bridge.ingest(retryPacket, "bridge-retry", 1);
+        assertEquals("SETTLED", retry.outcome());
+        assertEquals(aliceBefore.subtract(new BigDecimal("200.00")), accounts.findById("alice@demo").orElseThrow().getBalance());
+        assertEquals(bobBefore.add(new BigDecimal("200.00")), accounts.findById("bob@demo").orElseThrow().getBalance());
     }
 
     @Test

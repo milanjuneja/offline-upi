@@ -7,6 +7,7 @@ import com.demo.upimesh.model.MeshPacket;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -37,8 +38,21 @@ public class BridgeIngestionService {
                 return IngestResult.invalid(hash, "reused_nonce");
             }
         } catch (Exception e) {
+            if (isOptimisticLockFailure(e)) {
+                return IngestResult.retryable(hash, "concurrent_account_update");
+            }
             return IngestResult.invalid(hash, "internal_error");
         }
+    }
+
+    private boolean isOptimisticLockFailure(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof OptimisticLockingFailureException
+                    || current instanceof jakarta.persistence.OptimisticLockException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public record IngestResult(String outcome, String packetHash, String reason, Long transactionId) {
@@ -50,6 +64,9 @@ public class BridgeIngestionService {
         }
         public static IngestResult invalid(String hash, String reason) {
             return new IngestResult("INVALID", hash, reason, null);
+        }
+        public static IngestResult retryable(String hash, String reason) {
+            return new IngestResult("RETRYABLE_ERROR", hash, reason, null);
         }
     }
 }
