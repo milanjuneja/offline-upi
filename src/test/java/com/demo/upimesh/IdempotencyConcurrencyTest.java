@@ -15,6 +15,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
 
 import java.math.BigDecimal;
 import java.nio.file.Path;
@@ -22,12 +25,16 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * The killer test: simulates the "three bridges deliver at the same instant"
  * scenario the user explicitly cared about.
  */
 @SpringBootTest
+@AutoConfigureMockMvc
 class IdempotencyConcurrencyTest {
 
     @TempDir Path temporaryKeyDirectory;
@@ -40,6 +47,7 @@ class IdempotencyConcurrencyTest {
     @Autowired private AccountRepository accounts;
     @Autowired private HybridCryptoService crypto;
     @Autowired private ServerKeyHolder serverKey;
+    @Autowired private MockMvc mockMvc;
 
     @BeforeEach
     void clear() {
@@ -270,6 +278,27 @@ class IdempotencyConcurrencyTest {
         restarted.init();
 
         assertEquals(firstPublicKey, restarted.getPublicKeyBase64());
+    }
+
+    @Test
+    void invalidBridgeRequestReturnsStructuredValidationError() throws Exception {
+        mockMvc.perform(post("/api/bridge/ingest")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"packetId\":\"\",\"ttl\":-1,\"ciphertext\":\"\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("validation_failed"))
+                .andExpect(jsonPath("$.details.packetId").exists())
+                .andExpect(jsonPath("$.details.ttl").exists());
+    }
+
+    @Test
+    void invalidDemoAmountReturnsStructuredValidationError() throws Exception {
+        mockMvc.perform(post("/api/demo/send")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"senderVpa\":\"alice@demo\",\"receiverVpa\":\"bob@demo\",\"amount\":10.001,\"pin\":\"1234\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("validation_failed"))
+                .andExpect(jsonPath("$.details.amount").exists());
     }
 
     private MeshPacket packetFor(PaymentInstruction instruction) throws Exception {

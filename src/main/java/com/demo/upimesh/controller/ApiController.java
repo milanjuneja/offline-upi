@@ -1,15 +1,18 @@
 package com.demo.upimesh.controller;
 
 import com.demo.upimesh.crypto.ServerKeyHolder;
+import com.demo.upimesh.controller.dto.BridgeIngestRequest;
+import com.demo.upimesh.controller.dto.DemoSendRequest;
 import com.demo.upimesh.model.*;
 import com.demo.upimesh.service.*;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Min;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.math.BigDecimal;
 import java.util.*;
-import java.util.concurrent.ThreadPoolExecutor;
 
 /**
  * Public REST surface.
@@ -22,6 +25,7 @@ import java.util.concurrent.ThreadPoolExecutor;
  */
 @RestController
 @RequestMapping("/api")
+@Validated
 public class ApiController {
 
     @Autowired private ServerKeyHolder serverKey;
@@ -49,12 +53,12 @@ public class ApiController {
      * and inject it into the mesh at the given device.
      */
     @PostMapping("/demo/send")
-    public ResponseEntity<?> demoSend(@RequestBody DemoSendRequest req) throws Exception {
+    public ResponseEntity<?> demoSend(@Valid @RequestBody DemoSendRequest req) throws Exception {
         MeshPacket packet = demo.createPacket(
-                req.senderVpa, req.receiverVpa, req.amount, req.pin,
-                req.ttl == null ? 5 : req.ttl);
+                req.senderVpa(), req.receiverVpa(), req.amount(), req.pin(),
+                req.ttl() == null ? 5 : req.ttl());
 
-        String startDevice = req.startDevice == null ? "phone-alice" : req.startDevice;
+        String startDevice = req.startDevice() == null ? "phone-alice" : req.startDevice();
         mesh.inject(startDevice, packet);
 
         return ResponseEntity.ok(Map.of(
@@ -63,15 +67,6 @@ public class ApiController {
                 "ttl", packet.getTtl(),
                 "injectedAt", startDevice
         ));
-    }
-
-    public static class DemoSendRequest {
-        public String senderVpa;
-        public String receiverVpa;
-        public BigDecimal amount;
-        public String pin;
-        public Integer ttl;
-        public String startDevice;
     }
 
     // -------------------------------------------------------------- mesh sim
@@ -153,11 +148,11 @@ public class ApiController {
      */
     @PostMapping("/bridge/ingest")
     public ResponseEntity<?> ingest(
-            @RequestBody MeshPacket packet,
+            @Valid @RequestBody BridgeIngestRequest request,
             @RequestHeader(value = "X-Bridge-Node-Id", defaultValue = "unknown") String bridgeNodeId,
-            @RequestHeader(value = "X-Hop-Count", defaultValue = "0") int hopCount) {
+            @RequestHeader(value = "X-Hop-Count", defaultValue = "0") @Min(0) int hopCount) {
 
-        BridgeIngestionService.IngestResult r = bridge.ingest(packet, bridgeNodeId, hopCount);
+        BridgeIngestionService.IngestResult r = bridge.ingest(request.toMeshPacket(), bridgeNodeId, hopCount);
         return ResponseEntity.ok(r);
     }
 
