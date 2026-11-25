@@ -283,12 +283,22 @@ class IdempotencyConcurrencyTest {
     @Test
     void invalidBridgeRequestReturnsStructuredValidationError() throws Exception {
         mockMvc.perform(post("/api/bridge/ingest")
+                        .header("X-Bridge-Api-Key", "test-bridge-key")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"packetId\":\"\",\"ttl\":-1,\"ciphertext\":\"\"}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("validation_failed"))
                 .andExpect(jsonPath("$.details.packetId").exists())
                 .andExpect(jsonPath("$.details.ttl").exists());
+    }
+
+    @Test
+    void bridgeIngestionRejectsMissingApiKey() throws Exception {
+        mockMvc.perform(post("/api/bridge/ingest")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("invalid_bridge_credentials"));
     }
 
     @Test
