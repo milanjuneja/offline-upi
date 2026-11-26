@@ -1,0 +1,33 @@
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: upimesh
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - mysql-data:/var/lib/mysql
+
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      DB_URL: jdbc:mysql://db:3306/upimesh?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      DB_USERNAME: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+      UPI_MESH_BRIDGE_API_KEY: ${UPI_MESH_BRIDGE_API_KEY:?Set UPI_MESH_BRIDGE_API_KEY in .env}
+      UPI_MESH_KEY_DIRECTORY: /app/data/upimesh-keys
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - server-keys:/app/data/upimesh-keys
+
+volumes:
+  mysql-data:
+  server-keys:

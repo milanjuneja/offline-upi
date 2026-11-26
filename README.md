@@ -265,6 +265,29 @@ mvnw.cmd spring-boot:run
 On the first run, the Maven Wrapper downloads Maven and the required
 dependencies.
 
+### Run with Docker Compose
+
+Docker Compose starts MySQL and the application with persistent database and
+server-key volumes.
+
+~~~ bash
+cp .env.example .env
+# Edit .env and replace both placeholder secrets.
+docker compose up --build
+~~~
+
+On Windows PowerShell, create the environment file with:
+
+~~~ powershell
+Copy-Item .env.example .env
+~~~
+
+Then edit .env, replace both placeholder values, and run:
+
+~~~ powershell
+docker compose up --build
+~~~
+
 ### Open the dashboard
 
 After the application starts, open:
@@ -379,6 +402,7 @@ POST /api/bridge/ingest
 Content-Type: application/json
 X-Bridge-Node-Id: phone-bridge-42
 X-Hop-Count: 3
+X-Bridge-Api-Key: <UPI_MESH_BRIDGE_API_KEY>
 ```
 
 ``` json
