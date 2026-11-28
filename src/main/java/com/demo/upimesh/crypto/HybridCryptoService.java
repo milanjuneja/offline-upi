@@ -2,7 +2,6 @@ package com.demo.upimesh.crypto;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.demo.upimesh.model.PaymentInstruction;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import javax.crypto.Cipher;
@@ -29,8 +28,8 @@ import java.util.Base64;
  * Solution: generate a fresh AES key per packet, encrypt the JSON with AES-GCM
  * (fast + authenticated), then encrypt JUST the AES key with RSA-OAEP.
  *
- * Wire format (after base64 encoding):
- *   [ 256 bytes RSA-encrypted AES key ][ 12 bytes GCM IV ][ ciphertext + 16-byte tag ]
+ * Wire format:
+ *   enc1.<key-id>.<base64([ RSA-encrypted AES key ][ GCM IV ][ ciphertext + tag ])>
  *
  * AES-GCM is authenticated encryption: any single-bit tampering with the ciphertext
  * causes decryption to fail with an exception. This is what makes it safe for
@@ -46,11 +45,16 @@ public class HybridCryptoService {
     private static final int GCM_TAG_BITS = 128;
     private static final int RSA_ENCRYPTED_KEY_BYTES = 256; // for 2048-bit RSA
 
-    private final SecureRandom rng = new SecureRandom();
-    private final ObjectMapper json = new ObjectMapper();
+    private static final String ENVELOPE_VERSION = "enc1";
 
-    @Autowired
-    private ServerKeyHolder serverKey;
+    private final SecureRandom rng = new SecureRandom();
+    private final ObjectMapper json;
+    private final ServerKeyHolder serverKey;
+
+    public HybridCryptoService(ServerKeyHolder serverKey, ObjectMapper json) {
+        this.serverKey = serverKey;
+        this.json = json;
+    }
 
     /**
      * Encrypt a payment instruction with the server's public key.
@@ -84,7 +88,8 @@ public class HybridCryptoService {
         buf.put(iv);
         buf.put(aesCiphertext);
 
-        return Base64.getEncoder().encodeToString(buf.array());
+        return ENVELOPE_VERSION + "." + serverKey.getActiveKeyId() + "."
+                + Base64.getEncoder().encodeToString(buf.array());
     }
 
     /**
@@ -92,8 +97,15 @@ public class HybridCryptoService {
      * If anything has been tampered with — wrong key, modified ciphertext,
      * truncated input — this throws.
      */
-    public PaymentInstruction decrypt(String base64Ciphertext) throws Exception {
-        byte[] all = Base64.getDecoder().decode(base64Ciphertext);
+    public PaymentInstruction decrypt(String ciphertext) throws Exception {
+        String keyId = serverKey.getActiveKeyId();
+        String payload = ciphertext;
+        String[] envelope = ciphertext.split("\\.", 3);
+        if (envelope.length == 3 && ENVELOPE_VERSION.equals(envelope[0])) {
+            keyId = envelope[1];
+            payload = envelope[2];
+        }
+        byte[] all = Base64.getDecoder().decode(payload);
 
         if (all.length < RSA_ENCRYPTED_KEY_BYTES + GCM_IV_BYTES + GCM_TAG_BITS / 8) {
             throw new IllegalArgumentException("Ciphertext too short");
@@ -113,7 +125,7 @@ public class HybridCryptoService {
         Cipher rsa = Cipher.getInstance(RSA_TRANSFORMATION);
         OAEPParameterSpec oaep = new OAEPParameterSpec(
                 "SHA-256", "MGF1", MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT);
-        rsa.init(Cipher.DECRYPT_MODE, serverKey.getPrivateKey(), oaep);
+        rsa.init(Cipher.DECRYPT_MODE, serverKey.getPrivateKey(keyId), oaep);
         byte[] aesKeyBytes = rsa.doFinal(encryptedAesKey);
         SecretKey aesKey = new SecretKeySpec(aesKeyBytes, "AES");
 

@@ -21,6 +21,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.math.BigDecimal;
 import java.nio.file.Path;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -278,6 +279,25 @@ class IdempotencyConcurrencyTest {
         restarted.init();
 
         assertEquals(firstPublicKey, restarted.getPublicKeyBase64());
+    }
+
+    @Test
+    void rotatedKeyCanDecryptPacketCreatedWithRetainedKey() throws Exception {
+        ServerKeyHolder first = new ServerKeyHolder(temporaryKeyDirectory, "v1");
+        first.init();
+        HybridCryptoService originalCrypto = new HybridCryptoService(first, new ObjectMapper());
+        PaymentInstruction instruction = new PaymentInstruction(
+                "alice@demo", "bob@demo", new BigDecimal("25.00"), "pin", "rotated-key", System.currentTimeMillis());
+        String encryptedWithV1 = originalCrypto.encrypt(instruction, first.getPublicKey());
+
+        ServerKeyHolder rotated = new ServerKeyHolder(temporaryKeyDirectory, "v2");
+        rotated.init();
+        HybridCryptoService rotatedCrypto = new HybridCryptoService(rotated, new ObjectMapper());
+        PaymentInstruction decrypted = rotatedCrypto.decrypt(encryptedWithV1);
+
+        assertEquals("v2", rotated.getActiveKeyId());
+        assertNotEquals(first.getPublicKeyBase64(), rotated.getPublicKeyBase64());
+        assertEquals(instruction.getNonce(), decrypted.getNonce());
     }
 
     @Test

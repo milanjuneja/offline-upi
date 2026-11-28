@@ -41,6 +41,7 @@ public class ApiController {
     public Map<String, String> getServerPublicKey() {
         return Map.of(
                 "publicKey", serverKey.getPublicKeyBase64(),
+                "keyId", serverKey.getActiveKeyId(),
                 "algorithm", "RSA-2048 / OAEP-SHA256",
                 "hybridScheme", "RSA-OAEP encrypts an AES-256-GCM session key"
         );
